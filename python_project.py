@@ -3,10 +3,11 @@
 import warnings
 warnings.filterwarnings("ignore")
 
+import os
 import numpy as np
 import pandas as pd
 
-# Try to import matplotlib; if not available (e.g. on Streamlit Cloud), just skip plots
+# Try to import matplotlib; skip plots if not available
 try:
     import matplotlib.pyplot as plt
     HAS_MPL = True
@@ -38,13 +39,112 @@ DATA_FILE = "telecom_churn_dataset_current_operator.csv"
 OUR_OPERATOR_NAME = "OurTel"
 ENRICHED_OURTEL_FILE = "telecom_churn_with_scores_ourtel.csv"
 BEST_MODEL_FILE = "best_churn_model.pkl"
+RANDOM_SEED = 42
+N_CUSTOMERS = 50000
+
+
+# -----------------------------
+# 0️⃣ DATA GENERATION (if missing)
+# -----------------------------
+def generate_dataset() -> pd.DataFrame:
+    """Generate a synthetic telecom churn dataset with current_operator + region."""
+    np.random.seed(RANDOM_SEED)
+
+    df = pd.DataFrame({
+        "customer_id": np.arange(1, N_CUSTOMERS + 1),
+
+        # Demographics & Region
+        "age": np.random.randint(18, 70, N_CUSTOMERS),
+        "region": np.random.choice(
+            ["North", "South", "East", "West", "Central", "North-East", "Metro"],
+            N_CUSTOMERS,
+            p=[0.20, 0.20, 0.15, 0.15, 0.10, 0.10, 0.10]
+        ),
+
+        # Tenure & Revenue
+        "tenure_months": np.random.randint(1, 72, N_CUSTOMERS),
+        "monthly_charge": np.round(np.random.uniform(100, 1200, N_CUSTOMERS), 2),
+
+        # Usage & Quality
+        "call_drops": np.random.poisson(2, N_CUSTOMERS),
+        "network_issues": np.random.randint(0, 10, N_CUSTOMERS),
+        "data_speed_rating": np.random.randint(1, 6, N_CUSTOMERS),
+
+        # Support-Related
+        "customer_service_calls": np.random.poisson(1, N_CUSTOMERS),
+        "ticket_count_last_6_months": np.random.poisson(2, N_CUSTOMERS),
+        "issue_resolution_time_avg": np.random.uniform(2, 72, N_CUSTOMERS),  # hours
+        "customer_support_rating": np.random.randint(1, 6, N_CUSTOMERS),
+
+        # Current Operator (who they are using now)
+        "current_operator": np.random.choice(
+            ["OurTel", "Airtel", "Jio", "Vodafone", "BSNL"],
+            N_CUSTOMERS,
+            p=[0.35, 0.20, 0.20, 0.15, 0.10],  # OurTel is "us"
+        ),
+
+        # Plan Attributes
+        "plan_type": np.random.choice(["Prepaid", "Postpaid"], N_CUSTOMERS, p=[0.60, 0.40]),
+        "plan_category": np.random.choice(["Unlimited", "Data-only", "Voice-heavy", "Combo"], N_CUSTOMERS),
+        "addons_subscribed": np.random.choice(
+            ["None", "Prime", "Hotstar", "Netflix"],
+            N_CUSTOMERS,
+            p=[0.50, 0.20, 0.20, 0.10]
+        ),
+        "validity_days": np.random.choice([28, 56, 84, 365], N_CUSTOMERS, p=[0.40, 0.30, 0.20, 0.10]),
+
+        # Satisfaction
+        "dissatisfaction_score": np.random.randint(1, 11, N_CUSTOMERS),
+    })
+
+    # Derived revenue
+    df["total_charge"] = df["monthly_charge"] * df["tenure_months"]
+
+    # Operator-specific baseline churn risk (so some operators churn more)
+    operator_risk = {
+        "OurTel": 0.08,
+        "Airtel": 0.10,
+        "Jio": 0.12,
+        "Vodafone": 0.11,
+        "BSNL": 0.15
+    }
+    df["operator_risk"] = df["current_operator"].map(operator_risk)
+
+    # Churn probability model (synthetic but realistic)
+    prob = (
+        0.15 * (df["call_drops"] > 3).astype(int) +
+        0.20 * (df["network_issues"] > 5).astype(int) +
+        0.25 * (df["dissatisfaction_score"] > 7).astype(int) +
+        0.10 * (df["ticket_count_last_6_months"] > 3).astype(int) +
+        0.10 * (df["issue_resolution_time_avg"] > 36).astype(int) +
+        df["operator_risk"]
+    )
+
+    noise = np.random.normal(0, 0.1, N_CUSTOMERS)
+    df["churn"] = np.where(prob + noise > 0.6, 1, 0)
+
+    df = df.drop(columns=["operator_risk"])
+
+    return df
+
+
+def load_or_generate_data() -> pd.DataFrame:
+    """Load dataset from CSV if present, otherwise generate and save it."""
+    if os.path.exists(DATA_FILE):
+        print(f"Found existing dataset: {DATA_FILE}")
+        return pd.read_csv(DATA_FILE)
+
+    print(f"{DATA_FILE} not found. Generating synthetic dataset...")
+    df = generate_dataset()
+    df.to_csv(DATA_FILE, index=False)
+    print(f"Synthetic dataset saved to {DATA_FILE}")
+    return df
 
 
 # -----------------------------
 # 1️⃣ EDA
 # -----------------------------
 def plot_histogram(df, column, bins=30):
-    """Plot a histogram, if matplotlib is available."""
     if not HAS_MPL:
         return
     plt.figure(figsize=(6, 4))
@@ -58,7 +158,6 @@ def plot_histogram(df, column, bins=30):
 
 
 def plot_correlation_heatmap(df):
-    """Plot correlation heatmap, if matplotlib is available."""
     if not HAS_MPL:
         return
 
@@ -84,7 +183,6 @@ def plot_correlation_heatmap(df):
 
 
 def run_eda(df: pd.DataFrame) -> None:
-    """Print basic EDA summary and (optionally) plots."""
     print("===== BASIC INFO =====")
     print("Shape:", df.shape)
     print("\nHead:")
@@ -121,7 +219,6 @@ def run_eda(df: pd.DataFrame) -> None:
         )
         print(table)
 
-    # Plots only if matplotlib is available
     if HAS_MPL:
         hist_cols = [
             "tenure_months",
@@ -162,14 +259,13 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 
 
 def train_and_compare_models(df_ourtel: pd.DataFrame):
-    """Train Logistic Regression & Random Forest on OurTel customers and pick the best model."""
     df_ourtel = df_ourtel[df_ourtel["current_operator"] == OUR_OPERATOR_NAME].copy()
 
     X = df_ourtel.drop(columns=["customer_id", "churn", "current_operator"])
     y = df_ourtel["churn"]
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42, stratify=y
+        X, y, test_size=0.25, random_state=RANDOM_SEED, stratify=y
     )
 
     preprocessor = build_preprocessor(X)
@@ -177,7 +273,7 @@ def train_and_compare_models(df_ourtel: pd.DataFrame):
     models = {
         "LogisticRegression": LogisticRegression(max_iter=1000),
         "RandomForest": RandomForestClassifier(
-            n_estimators=200, random_state=42, n_jobs=-1
+            n_estimators=200, random_state=RANDOM_SEED, n_jobs=-1
         )
     }
 
@@ -244,7 +340,6 @@ def assign_risk_segment(prob: float) -> str:
 
 
 def score_and_segment(df_ourtel: pd.DataFrame, best_model: Pipeline) -> pd.DataFrame:
-    """Score OurTel customers, assign churn_probability + risk_segment."""
     df_ourtel = df_ourtel[df_ourtel["current_operator"] == OUR_OPERATOR_NAME].copy()
 
     X = df_ourtel.drop(columns=["customer_id", "churn", "current_operator"])
@@ -300,8 +395,8 @@ def add_retention_actions(df: pd.DataFrame) -> pd.DataFrame:
 # MAIN
 # -----------------------------
 def main():
-    print("Loading dataset:", DATA_FILE)
-    df = pd.read_csv(DATA_FILE)
+    print("Loading or generating dataset...")
+    df = load_or_generate_data()
 
     print("\nRunning EDA…")
     run_eda(df)
