@@ -1,305 +1,177 @@
-# -*- coding: utf-8 -*-
-
-import warnings
-warnings.filterwarnings("ignore")
-
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    confusion_matrix
-)
-
+import streamlit as st
 import joblib
 
-# -----------------------------
-# Global constants
-# -----------------------------
-DATA_FILE = "telecom_churn_dataset_current_operator.csv"
 OUR_OPERATOR_NAME = "OurTel"
-ENRICHED_OURTEL_FILE = "telecom_churn_with_scores_ourtel.csv"
+FULL_DATA_FILE = "telecom_churn_dataset_current_operator.csv"
+OURTEL_ENRICHED_FILE = "telecom_churn_with_scores_ourtel.csv"
 BEST_MODEL_FILE = "best_churn_model.pkl"
 
 
-# -----------------------------
-# 1️⃣ EDA
-# -----------------------------
-def plot_histogram(df, column, bins=30):
-    plt.figure(figsize=(6, 4))
-    plt.hist(df[column].dropna(), bins=bins, edgecolor="black")
-    plt.title(f"Histogram of {column}")
-    plt.xlabel(column)
-    plt.ylabel("Frequency")
-    plt.tight_layout()
-    plt.show()
-    plt.close()
+@st.cache_data
+def load_full_data():
+    if not os.path.exists(FULL_DATA_FILE):
+        st.error(f"{FULL_DATA_FILE} not found. Run python_project.py locally first and push the CSV.")
+        st.stop()
+    return pd.read_csv(FULL_DATA_FILE)
 
 
-def plot_correlation_heatmap(df):
-    numeric_df = df.select_dtypes(include=[np.number])
-    if numeric_df.empty:
-        print("No numeric columns for correlation heatmap.")
-        return
-
-    corr_matrix = numeric_df.corr()
-
-    plt.figure(figsize=(10, 8))
-    im = plt.imshow(corr_matrix, interpolation="nearest", aspect="auto")
-    plt.title("Correlation Heatmap")
-    plt.colorbar(im, fraction=0.046, pad=0.04)
-
-    ticks = np.arange(len(corr_matrix.columns))
-    plt.xticks(ticks, corr_matrix.columns, rotation=90)
-    plt.yticks(ticks, corr_matrix.columns)
-
-    plt.tight_layout()
-    plt.show()
-    plt.close()
+@st.cache_data
+def load_ourtel_data():
+    if not os.path.exists(OURTEL_ENRICHED_FILE):
+        st.error(f"{OURTEL_ENRICHED_FILE} not found. Run python_project.py locally first and push the CSV.")
+        st.stop()
+    return pd.read_csv(OURTEL_ENRICHED_FILE)
 
 
-def run_eda(df):
-    print("===== BASIC INFO =====")
-    print("Shape:", df.shape)
-    print("\nHead:")
-    print(df.head())
-    print("\nInfo:")
-    df.info()
-    print("\nDescribe:")
-    print(df.describe())
-
-    if "churn" in df.columns:
-        print("\nOverall churn rate:", df["churn"].mean())
-    else:
-        print("'churn' column not found.")
-        return
-
-    if "region" in df.columns:
-        print("\nChurn by region:")
-        print(df.groupby("region")["churn"].mean())
-
-    if "current_operator" in df.columns:
-        print("\nChurn by current operator:")
-        print(df.groupby("current_operator")["churn"].mean())
-
-    if "plan_type" in df.columns and "plan_category" in df.columns:
-        print("\nChurn by plan type & category:")
-        print(df.groupby(["plan_type", "plan_category"])["churn"].mean())
-
-    if "region" in df.columns and "current_operator" in df.columns:
-        print("\nChurn by region & operator:")
-        table = (
-            df.groupby(["region", "current_operator"])["churn"]
-            .mean()
-            .unstack()
-        )
-        print(table)
-
-    hist_cols = [
-        "tenure_months",
-        "monthly_charge",
-        "call_drops",
-        "network_issues",
-        "dissatisfaction_score",
-    ]
-    for col in hist_cols:
-        if col in df.columns:
-            plot_histogram(df, col)
-
-    plot_correlation_heatmap(df)
+@st.cache_resource
+def load_model():
+    if not os.path.exists(BEST_MODEL_FILE):
+        st.error(f"{BEST_MODEL_FILE} not found. Run python_project.py locally first and push the .pkl file.")
+        st.stop()
+    return joblib.load(BEST_MODEL_FILE)
 
 
-# -----------------------------
-# 2️⃣ MODEL TRAINING
-# -----------------------------
-def build_preprocessor(X):
-    numeric_features = X.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_features = X.select_dtypes(exclude=[np.number]).columns.tolist()
-
-    numeric_transformer = Pipeline([
-        ("scaler", StandardScaler())
-    ])
-    categorical_transformer = Pipeline([
-        ("onehot", OneHotEncoder(handle_unknown="ignore"))
-    ])
-
-    return ColumnTransformer(
-        transformers=[
-            ("num", numeric_transformer, numeric_features),
-            ("cat", categorical_transformer, categorical_features),
-        ]
-    )
-
-
-def train_and_compare_models(df_ourtel):
-    # Only OurTel customers for modeling
-    df_ourtel = df_ourtel[df_ourtel["current_operator"] == OUR_OPERATOR_NAME].copy()
-
-    X = df_ourtel.drop(columns=["customer_id", "churn", "current_operator"])
-    y = df_ourtel["churn"]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42, stratify=y
-    )
-
-    preprocessor = build_preprocessor(X)
-
-    models = {
-        "LogisticRegression": LogisticRegression(max_iter=1000),
-        "RandomForest": RandomForestClassifier(
-            n_estimators=200, random_state=42, n_jobs=-1
-        )
-    }
-
-    results = []
-    fitted_models = {}
-
-    print("\n===== MODEL TRAINING =====")
-
-    for name, clf in models.items():
-        print(f"\nTraining {name}...")
-        pipe = Pipeline([("preprocessor", preprocessor), ("model", clf)])
-        pipe.fit(X_train, y_train)
-        fitted_models[name] = pipe
-
-        y_pred = pipe.predict(X_test)
-        y_proba = pipe.predict_proba(X_test)[:, 1]
-
-        acc = accuracy_score(y_test, y_pred)
-        prec = precision_score(y_test, y_pred, zero_division=0)
-        rec = recall_score(y_test, y_pred, zero_division=0)
-        f1 = f1_score(y_test, y_pred, zero_division=0)
-        roc = roc_auc_score(y_test, y_proba)
-        cm = confusion_matrix(y_test, y_pred)
-
-        print(f"Accuracy:  {acc:.4f}")
-        print(f"Precision: {prec:.4f}")
-        print(f"Recall:    {rec:.4f}")
-        print(f"F1-score:  {f1:.4f}")
-        print(f"ROC-AUC:   {roc:.4f}")
-        print("Confusion Matrix:\n", cm)
-
-        results.append({
-            "model": name,
-            "accuracy": acc,
-            "precision": prec,
-            "recall": rec,
-            "f1_score": f1,
-            "roc_auc": roc
-        })
-
-    metrics_df = pd.DataFrame(results).set_index("model")
-    print("\n===== MODEL COMPARISON =====")
-    print(metrics_df)
-
-    best_name = metrics_df["roc_auc"].idxmax()
-    best_model = fitted_models[best_name]
-    print("\nBest model:", best_name)
-
-    joblib.dump(best_model, BEST_MODEL_FILE)
-    print("Saved best model to:", BEST_MODEL_FILE)
-
-    return best_model, metrics_df
-
-
-# -----------------------------
-# 3️⃣ SCORING + RISK
-# -----------------------------
-def assign_risk_segment(prob):
-    if prob < 0.30:
-        return "Low risk"
-    elif prob <= 0.70:
-        return "Grey area"
-    return "High risk"
-
-
-def score_and_segment(df_ourtel, best_model):
-    df_ourtel = df_ourtel[df_ourtel["current_operator"] == OUR_OPERATOR_NAME].copy()
-
-    X = df_ourtel.drop(columns=["customer_id", "churn", "current_operator"])
-    probs = best_model.predict_proba(X)[:, 1]
-
-    df_ourtel["churn_probability"] = probs
-    df_ourtel["risk_segment"] = df_ourtel["churn_probability"].apply(assign_risk_segment)
-
-    print("\nRisk segment distribution:")
-    print(df_ourtel["risk_segment"].value_counts())
-    print("\nRisk segment proportions:")
-    print(df_ourtel["risk_segment"].value_counts(normalize=True))
-    print("\nActual churn by segment:")
-    print(df_ourtel.groupby("risk_segment")["churn"].mean())
-
-    return df_ourtel
-
-
-# -----------------------------
-# 4️⃣ RETENTION ACTIONS
-# -----------------------------
-def retention_action(row):
-    actions = []
-
-    if row.get("call_drops", 0) >= 3:
-        actions.append("Optimize network; give free voice minutes.")
-    if row.get("network_issues", 0) >= 5:
-        actions.append("Provide free data voucher; prioritize network fix.")
-    if row.get("dissatisfaction_score", 0) >= 7:
-        actions.append("Proactive support call + goodwill credit.")
-    if row.get("monthly_charge", 0) >= 600 and row.get("tenure_months", 0) >= 12:
-        actions.append("Offer loyalty rewards and VIP care.")
-    if row.get("risk_segment") == "High risk":
-        actions.append("Urgent intervention by relationship manager.")
-    elif row.get("risk_segment") == "Grey area":
-        actions.append("Send targeted app/SMS offers.")
-
-    if not actions:
-        actions.append("Maintain engagement with periodic check-ins.")
-
-    return " ".join(actions)
-
-
-def add_retention_actions(df):
-    df = df.copy()
-    df["retention_actions"] = df.apply(retention_action, axis=1)
-    df.to_csv(ENRICHED_OURTEL_FILE, index=False)
-    print("\nSaved enriched dataset to:", ENRICHED_OURTEL_FILE)
-    return df
-
-
-# -----------------------------
-# MAIN
-# -----------------------------
 def main():
-    print("Loading dataset:", DATA_FILE)
-    df = pd.read_csv(DATA_FILE)
+    st.set_page_config(page_title="OurTel Churn Dashboard", layout="wide")
+    st.title("📊 OurTel Telecom Churn Dashboard")
 
-    print("\nRunning EDA…")
-    run_eda(df)
+    full_df = load_full_data()
+    ourtel_df = load_ourtel_data()
+    best_model = load_model()
 
-    df_ourtel = df[df["current_operator"] == OUR_OPERATOR_NAME].copy()
+    # keep only OurTel in enriched file
+    ourtel_df = ourtel_df[ourtel_df["current_operator"] == OUR_OPERATOR_NAME].copy()
 
-    print("\nTraining models…")
-    best_model, metrics = train_and_compare_models(df_ourtel)
+    # ----- KPIs -----
+    total_ourtel = len(ourtel_df)
+    ourtel_churn_rate = ourtel_df["churn"].mean() if total_ourtel else 0.0
+    grey_share = (ourtel_df["risk_segment"] == "Grey area").mean() if total_ourtel else 0.0
+    high_share = (ourtel_df["risk_segment"] == "High risk").mean() if total_ourtel else 0.0
 
-    print("\nScoring customers…")
-    scored = score_and_segment(df_ourtel, best_model)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("OurTel Customers", f"{total_ourtel:,}")
+    c2.metric("OurTel Churn Rate", f"{ourtel_churn_rate:.1%}")
+    c3.metric("Grey-area Customers", f"{grey_share:.1%}")
+    c4.metric("High-risk Customers", f"{high_share:.1%}")
 
-    print("\nAdding retention recommendations…")
-    enriched = add_retention_actions(scored)
+    st.markdown("---")
 
-    print("\nDONE!")
-    print("Best model saved at:", BEST_MODEL_FILE)
-    print("Enriched dataset saved at:", ENRICHED_OURTEL_FILE)
+    # ----- Sidebar filters -----
+    st.sidebar.header("Filters (OurTel only)")
+
+    regions = sorted(ourtel_df["region"].dropna().unique().tolist())
+    risk_segments = sorted(ourtel_df["risk_segment"].dropna().unique().tolist())
+    plan_types = sorted(ourtel_df["plan_type"].dropna().unique().tolist())
+
+    selected_regions = st.sidebar.multiselect("Region", regions, default=regions)
+    selected_risk = st.sidebar.multiselect("Risk segment", risk_segments, default=risk_segments)
+    selected_plan = st.sidebar.multiselect("Plan type", plan_types, default=plan_types)
+
+    ourtel_filtered = ourtel_df[
+        ourtel_df["region"].isin(selected_regions)
+        & ourtel_df["risk_segment"].isin(selected_risk)
+        & ourtel_df["plan_type"].isin(selected_plan)
+    ]
+
+    st.subheader("Filtered OurTel Segment Overview")
+    st.write(f"Customers in filter: **{len(ourtel_filtered):,}**")
+    if len(ourtel_filtered):
+        st.write(f"Churn rate in filter: **{ourtel_filtered['churn'].mean():.1%}**")
+    else:
+        st.write("Churn rate in filter: N/A")
+
+    # ----- Tabs -----
+    tab_overview, tab_risk = st.tabs(["🌍 Market Overview", "📉 OurTel Risk & Actions"])
+
+    # ===== TAB 1: MARKET OVERVIEW =====
+    with tab_overview:
+        st.markdown("### Churn by Operator and Region (all customers)")
+
+        if {"region", "current_operator", "churn"}.issubset(full_df.columns):
+            op_region = (
+                full_df.groupby(["region", "current_operator"])["churn"]
+                .mean()
+                .reset_index()
+            )
+            pivot = op_region.pivot(index="region", columns="current_operator", values="churn")
+
+            st.write("Churn rate table:")
+            if not pivot.empty:
+                st.dataframe(pivot.style.format("{:.1%}"))
+            else:
+                st.dataframe(pivot)
+
+            # bar plot of churn by operator
+            op_churn = (
+                full_df.groupby("current_operator")["churn"]
+                .mean()
+                .sort_values(ascending=False)
+                .reset_index()
+            )
+            fig, ax = plt.subplots()
+            ax.bar(op_churn["current_operator"], op_churn["churn"])
+            ax.set_ylabel("Churn rate")
+            ax.set_title("Churn Rate by Operator")
+            ax.set_xticklabels(op_churn["current_operator"], rotation=45)
+            st.pyplot(fig)
+        else:
+            st.info("Columns 'region', 'current_operator', 'churn' not all present.")
+
+    # ===== TAB 2: OURTEL RISK & ACTIONS =====
+    with tab_risk:
+        st.markdown("### OurTel Risk Segmentation")
+
+        if len(ourtel_filtered) == 0:
+            st.warning("No OurTel customers for current filter.")
+        else:
+            # risk distribution
+            risk_counts = ourtel_filtered["risk_segment"].value_counts().reindex(
+                ["Low risk", "Grey area", "High risk"]
+            )
+            fig_r, ax_r = plt.subplots()
+            ax_r.bar(risk_counts.index, risk_counts.values)
+            ax_r.set_ylabel("Number of customers")
+            ax_r.set_title("OurTel Customers by Risk Segment")
+            st.pyplot(fig_r)
+
+            # churn probability distribution
+            if "churn_probability" in ourtel_filtered.columns:
+                fig_p, ax_p = plt.subplots()
+                ax_p.hist(ourtel_filtered["churn_probability"], bins=30, edgecolor="black")
+                ax_p.set_xlabel("Churn probability")
+                ax_p.set_ylabel("Frequency")
+                ax_p.set_title("Churn Probability Distribution (Filtered OurTel)")
+                st.pyplot(fig_p)
+
+            st.markdown("### Top Grey & High-risk OurTel Customers")
+            risky = (
+                ourtel_filtered[
+                    ourtel_filtered["risk_segment"].isin(["Grey area", "High risk"])
+                ]
+                .sort_values("churn_probability", ascending=False)
+                .head(100)
+            )
+
+            cols_to_show = [
+                "customer_id",
+                "region",
+                "plan_type",
+                "plan_category",
+                "monthly_charge",
+                "call_drops",
+                "network_issues",
+                "dissatisfaction_score",
+                "churn_probability",
+                "risk_segment",
+                "retention_actions",
+            ]
+            cols_to_show = [c for c in cols_to_show if c in risky.columns]
+
+            st.dataframe(risky[cols_to_show])
 
 
 if __name__ == "__main__":
